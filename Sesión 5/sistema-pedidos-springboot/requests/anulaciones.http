@@ -1,0 +1,35 @@
+@spring = http://localhost:8081/sistema-pedidos
+@inv = http://localhost:8082/inventario-service/api/inventario
+
+### Registrar pedido LAP-001 x 2 (formulario; responde 302)
+POST {{spring}}/pedidos
+Content-Type: application/x-www-form-urlencoded
+
+cliente=Ana+Torres&productoCodigo=LAP-001&cantidad=2
+
+### Listar pedidos (ver estado)
+GET {{spring}}/api/v1/orders
+
+### Anular pedido 1
+POST {{spring}}/api/v1/anulaciones
+Content-Type: application/json
+
+{
+  "pedidoId": 1,
+  "motivo": "Solicitud del cliente"
+}
+
+### Anular pedido inexistente (espera 404)
+POST {{spring}}/api/v1/anulaciones
+Content-Type: application/json
+
+{
+  "pedidoId": 999,
+  "motivo": "No existe"
+}
+
+### Listar anulaciones
+GET {{spring}}/api/v1/anulaciones
+
+### Stock actual de LAP-001
+GET {{inv}}/productos/codigo/LAP-001/stock
