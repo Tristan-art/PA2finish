@@ -1,0 +1,82 @@
+@baseUrl = http://localhost:8082/inventario-service/api
+
+### Listar catálogo completo: nombre, precio y stock
+GET {{baseUrl}}/inventario/productos
+Accept: application/json
+
+### Consultar producto por código
+GET {{baseUrl}}/inventario/productos/codigo/LAP-001
+Accept: application/json
+
+
+### Consultar stock por código
+GET {{baseUrl}}/inventario/productos/codigo/LAP-001/stock
+Accept: application/json
+
+### Reservar por código: devuelve también nombre y precio
+POST {{baseUrl}}/inventario/productos/codigo/LAP-001/reservas
+Content-Type: application/json
+Accept: application/json
+
+{
+  "cantidad": 2
+}
+
+### Validación: cantidad inválida
+POST {{baseUrl}}/inventario/productos/codigo/LAP-001/reservas
+Content-Type: application/json
+Accept: application/json
+
+{
+  "cantidad": 0
+}
+
+### Regla de negocio: stock insuficiente
+POST {{baseUrl}}/inventario/productos/codigo/LAP-001/reservas
+Content-Type: application/json
+Accept: application/json
+
+{
+  "cantidad": 9999
+}
+
+
+
+
+
+
+### Devolución válida (+2 unidades)
+POST {{baseUrl}}/inventario/productos/codigo/LAP-001/devoluciones
+Content-Type: application/json
+Accept: application/json
+
+{
+  "cantidad": 2
+}
+
+### Devolución inválida: cantidad 0 (espera 400)
+POST {{baseUrl}}/inventario/productos/codigo/LAP-001/devoluciones
+Content-Type: application/json
+Accept: application/json
+
+{
+  "cantidad": 0
+}
+
+### Devolución inválida: cantidad negativa (espera 400)
+POST {{baseUrl}}/inventario/productos/codigo/LAP-001/devoluciones
+Content-Type: application/json
+Accept: application/json
+
+{
+  "cantidad": -1
+}
+
+### Código inexistente (espera 404)
+POST {{baseUrl}}/inventario/productos/codigo/NOPE-999/devoluciones
+Content-Type: application/json
+Accept: application/json
+
+{
+  "cantidad": 1
+}
