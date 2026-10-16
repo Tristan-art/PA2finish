@@ -14,6 +14,9 @@ import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.isil.edu.pe.spedidos.client.DevolucionStockClient;
+import org.slf4j.Logger;import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 /**
  * Implementación de las operaciones de negocio definidas por
  * {@link PedidoService}.
@@ -60,8 +63,12 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class PedidoServiceImpl implements PedidoService {
 
-  private final PedidoRepository pedidoRepository;
-  private final InventarioClient inventarioClient;
+    private static final Logger log = LoggerFactory.getLogger(PedidoServiceImpl.class);
+
+    private final PedidoRepository pedidoRepository;
+    private final InventarioClient inventarioClient;
+    private final DevolucionStockClient devolucionStockClient;
+    private final boolean simularFalloPostReserva;
 
   /**
    * Construye el servicio utilizando las dependencias proporcionadas
@@ -84,9 +91,15 @@ public class PedidoServiceImpl implements PedidoService {
    * @param inventarioClient cliente utilizado para comunicarse
    *                         con el servicio de Inventario
    */
-  public PedidoServiceImpl(PedidoRepository pedidoRepository, InventarioClient inventarioClient) {
-    this.pedidoRepository = pedidoRepository;
-    this.inventarioClient = inventarioClient;
+  public PedidoServiceImpl(
+          PedidoRepository pedidoRepository,
+          InventarioClient inventarioClient,
+          DevolucionStockClient devolucionStockClient,
+          @Value("${pedidos.simular-fallo-post-reserva:false}") boolean simularFalloPostReserva) {
+      this.pedidoRepository = pedidoRepository;
+      this.inventarioClient = inventarioClient;
+      this.devolucionStockClient = devolucionStockClient;
+      this.simularFalloPostReserva = simularFalloPostReserva;
   }
 
   /**
@@ -122,122 +135,95 @@ public class PedidoServiceImpl implements PedidoService {
   @Override
   @Transactional
   public Pedido registrarPedido(String cliente, String productoCodigo, int cantidad) {
-    validarDatos(cliente, productoCodigo, cantidad);
+      validarDatos(cliente, productoCodigo, cantidad);
 
-    final ReservaStockResponse reserva;
+      final ReservaStockResponse reserva;
 
-    try {
-      reserva = inventarioClient.reservarStock(productoCodigo.trim(), cantidad);
-    } catch (InventarioClientException e) {
-      /*
-       * Los errores 5xx corresponden a fallos técnicos del servicio remoto
-       * y no deben presentarse como un error de datos ingresados por el usuario.
-       */
-      if (e.getStatus() >= 500) {
-        throw new InventarioNoDisponibleException(
-            "El servicio de inventario presentó un error temporal (HTTP "
-                + e.getStatus()
-                + ").",
-            e
-        );
+      try {
+          reserva = inventarioClient.reservarStock(productoCodigo.trim(), cantidad);
+      } catch (InventarioClientException e) {
+          if (e.getStatus() >= 500) {
+              throw new InventarioNoDisponibleException(
+                      "El servicio de inventario presentó un error temporal (HTTP "
+                              + e.getStatus()
+                              + ").",
+                      e
+              );
+          }
+          throw new PedidoException(e.getMessage(), e);
       }
 
-      /*
-       * Los errores funcionales 4xx se traducen a una excepción de negocio,
-       * conservando la causa original para facilitar el diagnóstico.
-       */
-      throw new PedidoException(e.getMessage(), e);
-    }
+      validarReserva(reserva);
 
-    validarReserva(reserva);
+      BigDecimal total = reserva.getPrecio().multiply(BigDecimal.valueOf(cantidad));
 
-    BigDecimal total = reserva.getPrecio().multiply(BigDecimal.valueOf(cantidad));
+      Pedido pedido = new Pedido(cliente.trim(), reserva.getCodigo(), reserva.getNombre(),
+              reserva.getPrecio(), cantidad, total);
 
-    Pedido pedido = new Pedido(cliente.trim(), reserva.getCodigo(), reserva.getNombre(),
-            reserva.getPrecio(), cantidad, total);
-
-    return pedidoRepository.save(pedido);
+      try {
+          if (simularFalloPostReserva) {
+              throw new PedidoException("Fallo local simulado después de la reserva (solo pruebas).");
+          }
+          return pedidoRepository.save(pedido);
+      } catch (RuntimeException e) {
+          // La reserva remota ya fue confirmada: hay que deshacerla con la API de devolución.
+          compensarReserva(productoCodigo.trim(), cantidad);
+          throw e; // al relanzar, @Transactional revierte lo local en H2
+      }
   }
 
-  /**
-   * Obtiene los productos disponibles mediante el cliente de Inventario.
-   *
-   * <p>La implementación delega la responsabilidad de comunicación
-   * externa en {@link InventarioClient}. Por ello, esta clase no conoce
-   * detalles como URLs, métodos HTTP o serialización JSON.</p>
-   *
-   * @return lista de productos disponibles
-   */
-  @Override
-  public List<ProductoInventarioResponse> listarProductos() {
-    return inventarioClient.listarProductos();
-  }
-
-  /**
-   * Obtiene todos los pedidos registrados en la base de datos local.
-   *
-   * <p>La consulta se ejecuta mediante {@link PedidoRepository},
-   * solicitando los registros ordenados de forma descendente por
-   * identificador.</p>
-   *
-   * <p>{@code readOnly = true} indica que la transacción se utiliza
-   * únicamente para lectura y no pretende modificar información.</p>
-   *
-   * @return lista de pedidos ordenados por identificador descendente
-   */
-  @Override
-  @Transactional(readOnly = true)
-  public List<Pedido> listarPedidos() {
-    return pedidoRepository.findAllByOrderByIdDesc();
-  }
-
-  /**
-   * Valida los datos mínimos necesarios para registrar un pedido.
-   *
-   * @param cliente cliente asociado al pedido
-   * @param productoCodigo código del producto
-   * @param cantidad cantidad solicitada
-   * @throws PedidoException cuando algún dato requerido es inválido
-   */
-  private void validarDatos(String cliente, String productoCodigo, int cantidad) {
-    if (cliente == null || cliente.isBlank()) {
-      throw new PedidoException(
-          "El cliente es obligatorio."
-      );
+    @Override
+    public List<ProductoInventarioResponse> listarProductos() {
+        return inventarioClient.listarProductos();
     }
 
-    if (productoCodigo == null
-        || productoCodigo.isBlank()) {
-      throw new PedidoException(
-          "Debe seleccionar un producto."
-      );
+    @Override
+    @Transactional(readOnly = true)
+    public List<Pedido> listarPedidos() {
+        return pedidoRepository.findAllByOrderByIdDesc();
     }
 
-    if (cantidad <= 0) {
-      throw new PedidoException(
-          "La cantidad debe ser mayor que cero."
-      );
+    private void compensarReserva(String codigo, int cantidad) {
+        try {
+            devolucionStockClient.devolverStock(codigo, cantidad);
+            log.warn("Reserva compensada: se devolvieron {} unidades de {}.", cantidad, codigo);
+        } catch (RuntimeException ex) {
+            log.error("INCIDENTE PENDIENTE DE CONCILIACION: no se pudo devolver {} unidades de {}.", cantidad, codigo, ex);
+        }
     }
-  }
 
-  /**
-   * Valida que la respuesta retornada por Inventario contenga
-   * la información mínima necesaria para crear el pedido.
-   *
-   * @param reserva respuesta recibida desde {@code inventario-service}
-   * @throws PedidoException si la respuesta es nula o incompleta
-   */
-  private void validarReserva(ReservaStockResponse reserva) {
-    if (reserva == null
-        || reserva.getCodigo() == null
-        || reserva.getCodigo().isBlank()
-        || reserva.getNombre() == null
-        || reserva.getNombre().isBlank()
-        || reserva.getPrecio() == null) {
-      throw new PedidoException(
-          "inventario-service devolvió "
-              + "una respuesta incompleta."
-      );
+    private void validarDatos(String cliente, String productoCodigo, int cantidad) {
+        if (cliente == null || cliente.isBlank()) {
+            throw new PedidoException(
+                    "El cliente es obligatorio."
+            );
+        }
+
+        if (productoCodigo == null
+                || productoCodigo.isBlank()) {
+            throw new PedidoException(
+                    "Debe seleccionar un producto."
+            );
+        }
+
+        if (cantidad <= 0) {
+            throw new PedidoException(
+                    "La cantidad debe ser mayor que cero."
+            );
+        }
     }
-  }
+
+    private void validarReserva(ReservaStockResponse reserva) {
+        if (reserva == null
+                || reserva.getCodigo() == null
+                || reserva.getCodigo().isBlank()
+                || reserva.getNombre() == null
+                || reserva.getNombre().isBlank()
+                || reserva.getPrecio() == null) {
+            throw new PedidoException(
+                    "inventario-service devolvió "
+                            + "una respuesta incompleta."
+            );
+        }
+    }
 }
